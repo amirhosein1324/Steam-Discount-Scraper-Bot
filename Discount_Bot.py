@@ -14,7 +14,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -30,7 +29,6 @@ user_offsets = {}
 def setup_database():
     """Initializes the SQLite database with WAL mode for concurrency."""
     conn = sqlite3.connect(DATABASE_NAME)
-    
     conn.execute('PRAGMA journal_mode=WAL;')
     
     cursor = conn.cursor()
@@ -39,9 +37,8 @@ def setup_database():
             id INTEGER PRIMARY KEY,
             game_name TEXT NOT NULL,
             steam_link TEXT,
-            scrape_date TEXT
-        )
-    ''')
+            scrape_date TEXT)''')
+    
     conn.commit()
     conn.close()
     print(f"Database '{DATABASE_NAME}' set up successfully (WAL Mode Enabled).")
@@ -248,7 +245,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_games_batch(update, chat_id, start_fresh=True)
         
 
-
 if __name__ == '__main__':
     setup_database()
 
@@ -267,5 +263,4 @@ if __name__ == '__main__':
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("more", more_command))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
         application.run_polling()
