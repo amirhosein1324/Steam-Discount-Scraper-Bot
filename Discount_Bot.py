@@ -313,7 +313,7 @@ async def post_init(application: Application):
 if __name__ == '__main__':
     setup_database()
 
-    BOT_TOKEN = "8496827253:AAFuBLX57cXp3UI125eSDY9C330AQLoopYI"
+    BOT_TOKEN = "your_telegram_bot_token_here"
     
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print("ERROR: You must edit the file and insert your Telegram Bot Token!")
