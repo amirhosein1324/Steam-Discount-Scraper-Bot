@@ -17,6 +17,7 @@ This is a simple Python project that watches Steam discount games and lets you b
 - Provides a Telegram bot with:
   - a button to get discounted Steam games from the database.
   - a `/more` command to load the next 50 games til the end.
+  - price section that gives discounted price to user
 
 ---
 
@@ -35,6 +36,7 @@ This is a simple Python project that watches Steam discount games and lets you b
   
   - Uses BeautifulSoup to select each game row and extract:
     - Game title.
+    - Game Price
     - Steam link.
     
   - Puts all games into a list of dictionaries along with the current scrape date.
@@ -51,12 +53,14 @@ This is a simple Python project that watches Steam discount games and lets you b
 - The `sales` table has:
  - id (primary key auto-increment).
  - game_name (text).
+ - game price
  - steam_link (text).
  - scrape_date (text).
  
 -clear_and_save_data:
  - Deletes all old rows in sales.
  - Inserts the new scraped games in bulk.
+ - gives new discounted games to user
  
 - `get_games_from_db_sync(limit, offset)`:
  - Returns a list of (game_name, steam_link) rows using the given limit and offset.
@@ -76,6 +80,8 @@ This is a simple Python project that watches Steam discount games and lets you b
   - Sleeps for `SURVEILLANCE_INTERVAL` seconds (default: 1800 seconds = 30 minutes).
   
   - If scraping fails, it sleeps 60 seconds and tries again.
+  
+  - Sends new discounted games to user.
 
 ---
 
@@ -109,6 +115,7 @@ This bot utilizes the async version of `python-telegram-bot` (Application class 
  
  - builds message chunks with each game in the format:
   -`Game_Name`
+  -`Game Price`
   -`Game_Link`
   
  - makes sure each message is under 4000 characters (for  telegram message limits).
