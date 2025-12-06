@@ -2,6 +2,7 @@ import time
 import sqlite3
 import threading
 import asyncio
+import random
 from datetime import datetime
 from bs4 import BeautifulSoup
 from functools import partial
@@ -17,79 +18,103 @@ from webdriver_manager.chrome import ChromeDriverManager
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-
 DATABASE_NAME = 'steam_sales.db'
 URL = 'https://store.steampowered.com/search/?supportedlang=english&specials=1&ndl=1'
 SCROLL_PAUSE_TIME = 2.0
-SURVEILLANCE_INTERVAL = 1800  
+SURVEILLANCE_INTERVAL = 1800
 
+subscribed_users = set()
+bot_application = None
+bot_loop = None
 
-user_offsets = {}
+def price_cleanup(price_str):
+    """Cleans up price strings by removing unwanted characters."""
+    if not isinstance(price_str, str):
+        return price_str
+    price_str = price_str.replace('%', '').strip()
+    return price_str
 
 def setup_database():
-    """Initializes the SQLite database with WAL mode for concurrency."""
+    """Initializes the SQLite database with price columns."""
     conn = sqlite3.connect(DATABASE_NAME)
     conn.execute('PRAGMA journal_mode=WAL;')
-    
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY,
             game_name TEXT NOT NULL,
-            steam_link TEXT,
-            scrape_date TEXT)''')
-    
+            steam_link TEXT UNIQUE,
+            original_price TEXT,
+            discount_price TEXT,
+            scrape_date TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"Database '{DATABASE_NAME}' set up successfully (WAL Mode Enabled).")
 
-def clear_and_save_data(data):
-    """Clears old data and saves new scrape results."""
+def get_existing_links():
+    """Fetches all existing Steam links to compare for new arrivals."""
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
+    cursor.execute("SELECT steam_link FROM sales")
+    links = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    return links
+
+def save_new_data(data):
+    """Saves data. Returns a list of NEW games that weren't in the DB before."""
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    
+    existing_links = get_existing_links()
+    
+    new_arrivals = []
     
     try:
         cursor.execute('DELETE FROM sales')
         
         insert_sql = '''
-            INSERT INTO sales (game_name, steam_link, scrape_date)
-            VALUES (?, ?, ?)
+            INSERT INTO sales (game_name, steam_link, original_price, discount_price, scrape_date)
+            VALUES (?, ?, ?, ?, ?)
         '''
         
-        records_to_insert = [
-            (item['name'], item['steam_link'], item['scrape_date'])
-            for item in data
-        ]
+        records_to_insert = []
+        for item in data:
+            records_to_insert.append((
+                item['name'], 
+                item['steam_link'], 
+                item['original_price'],
+                item['discount_price'],
+                item['scrape_date']
+            ))
+            
+            if item['steam_link'] not in existing_links:
+                new_arrivals.append(item)
         
         cursor.executemany(insert_sql, records_to_insert)
         conn.commit()
-        print(f"[DB] Successfully saved {len(records_to_insert)} games to database.")
+        print(f"[DB] Saved {len(records_to_insert)} games. Found {len(new_arrivals)} NEW discounts.")
+        
     except Exception as e:
         print(f"[DB Error] Failed to save data: {e}")
+        new_arrivals = [] 
     finally:
         conn.close()
+        
+    return new_arrivals, len(existing_links)
 
-def get_games_from_db_sync(limit, offset):
-    """Synchronous function to fetch games (to be run in executor)."""
+def get_random_games_sync(limit=5):
+    """Fetches 5 random games."""
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT game_name, steam_link FROM sales ORDER BY id ASC LIMIT ? OFFSET ?", (limit, offset))
+    cursor.execute("SELECT game_name, steam_link, original_price, discount_price FROM sales ORDER BY RANDOM() LIMIT ?", (limit,))
     results = cursor.fetchall()
     conn.close()
     return results
 
-def get_total_count_sync():
-    """Synchronous function to get total count."""
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM sales")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
-
 def initialize_selenium():
     chrome_options = Options()
-    
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -108,7 +133,7 @@ def initialize_selenium():
         return None
 
 def run_scraper_logic():
-    """The core logic to scrape Steam."""
+    """Scrapes Steam Search Results including Prices."""
     driver = initialize_selenium()
     if not driver:
         return []
@@ -119,19 +144,34 @@ def run_scraper_logic():
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "search_resultsRows")))
         
         last_height = driver.execute_script("return document.body.scrollHeight")
+        retries = 0
+        
         while True:
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             time.sleep(SCROLL_PAUSE_TIME)
             new_height = driver.execute_script("return document.body.scrollHeight")
+            
             if new_height == last_height:
-                break
+
+                if retries < 3:
+                    retries += 1
+                    print(f"[Scraper] Page stuck (Retry {retries}/3)... waiting longer...")
+                    time.sleep(3) 
+                    continue
+                else:
+                    print("[Scraper] Reached bottom of page.")
+                    break
+            
+            
+            retries = 0
             last_height = new_height
         
+
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
         sales_items = soup.select('#search_resultsRows a.search_result_row')
         
-        print(f"[Scraper] Found {len(sales_items)} items.")
+        print(f"[Scraper] Found {len(sales_items)} items. Extracting prices...")
         
         scraped_data = []
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -142,9 +182,39 @@ def run_scraper_logic():
                 game_name = name_element.text.strip() if name_element else "Unknown Game"
                 steam_link = item.get('href', 'N/A')
                 
+                original_price = "N/A"
+                discount_price = "N/A"
+                
+                price_container = item.select_one('.search_price_discount_combined')
+                
+                if not price_container:
+                     price_container = item.select_one('.search_price')
+
+                if price_container:
+                     temp_soup = BeautifulSoup(str(price_container), 'html.parser')
+                     original_element = temp_soup.select_one('strike')
+                     
+                     if original_element:
+                         original_price = price_cleanup(original_element.text)
+                         
+
+                         original_element.decompose()
+                         
+                         percent_element = temp_soup.select_one('.search_discount_percentage')
+                         if percent_element:
+                             percent_element.decompose()
+                             
+                         discount_price = price_cleanup(temp_soup.get_text())
+                         
+                     else:
+                         discount_price = price_cleanup(price_container.get_text())
+                         original_price = discount_price 
+
                 scraped_data.append({
                     'name': game_name,
                     'steam_link': steam_link,
+                    'original_price': original_price,
+                    'discount_price': discount_price,
                     'scrape_date': current_date
                 })
             except:
@@ -159,13 +229,47 @@ def run_scraper_logic():
         if driver:
             driver.quit()
 
+async def broadcast_alert(new_games):
+    """Sends a message to all subscribed users about new games."""
+    if not bot_application:
+        return
+        
+    print(f"[Alert] Sending alerts to {len(subscribed_users)} users for {len(new_games)} new games.")
+    
+    if len(new_games) > 20:
+        msg = f"🚨 <b>Surveillance Update:</b> {len(new_games)} new discounted games detected!\nCheck the bot for details."
+        for chat_id in subscribed_users:
+            try:
+                await bot_application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+            except:
+                pass
+    else:
+        for game in new_games:
+            msg = (f"🚨 <b>NEW DISCOUNT DETECTED!</b>\n\n"
+                   f"🎮 {game['name']}\n"
+                   f"💰 {game['original_price']} ➡️ {game['discount_price']}\n"
+                   f"🔗 {game['steam_link']}")
+            
+            for chat_id in subscribed_users:
+                try:
+                    await bot_application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+                except Exception as e:
+                    print(f"Failed to send to {chat_id}: {e}")
+
 def surveillance_loop():
-    """Runs the scraper in a background thread continuously."""
+    """Runs the scraper and triggers alerts."""
     print("--- Surveillance System Started ---")
     while True:
         data = run_scraper_logic()
+        
         if data:
-            clear_and_save_data(data)
+            new_arrivals, previous_count = save_new_data(data)
+            
+
+            if new_arrivals and previous_count > 0:
+                if bot_application and bot_loop:
+                    asyncio.run_coroutine_threadsafe(broadcast_alert(new_arrivals), bot_loop)
+            
             print(f"[Surveillance] Sleeping for {SURVEILLANCE_INTERVAL} seconds...")
         else:
             print("[Surveillance] Scrape failed. Retrying in 60 seconds...")
@@ -176,91 +280,50 @@ def surveillance_loop():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sends a welcome message with the custom keyboard including /more."""
-    keyboard = [['Discounted Steam Games'], ['/more']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text(
-        "Welcome to the Steam Sales Surveillance Bot! 🤖\n"
-        "Press 'Discounted Steam Games' to start fresh.\n"
-        "Press '/more' to load the next 50 games.",
-        reply_markup=reply_markup
-    )
-    user_offsets[update.effective_chat.id] = 0
-
-async def send_games_batch(update, chat_id, start_fresh=False):
-    """Helper function to fetch and send a batch of games asynchronously."""
+    """Subscribes user and sends 5 random games."""
+    chat_id = update.effective_chat.id
+    subscribed_users.add(chat_id)
     
-    if chat_id not in user_offsets or start_fresh:
-        user_offsets[chat_id] = 0
-        
-    current_offset = user_offsets[chat_id]
+    await update.message.reply_text(
+        "👋 Welcome! You are now subscribed to Steam Sales Surveillance.\n"
+        "You will receive alerts whenever NEW discounts appear.\n\n"
+        "🎲 Here are 5 random deals from the vault right now:"
+    )
     
     loop = asyncio.get_running_loop()
+    random_games = await loop.run_in_executor(None, partial(get_random_games_sync, limit=5))
     
-    if start_fresh:
-        total_count = await loop.run_in_executor(None, get_total_count_sync)
-        if total_count == 0:
-            await update.message.reply_text("The database is currently empty. Please wait for the scraper to finish its first run.")
-            return
-        await update.message.reply_text(f"🔍 Found {total_count} games in database.\nHere are the first 50 results:")
-    else:
-        await update.message.reply_text(f"🔄 Loading next 50 games (Offset: {current_offset})...")
-        
-    games = await loop.run_in_executor(None, partial(get_games_from_db_sync, limit=50, offset=current_offset))
-    
-    if not games:
-        if current_offset == 0:
-             await update.message.reply_text("🚫 Database is empty or the scraper is running its first cycle.")
-        else:
-             await update.message.reply_text(f"🚫 No more games found after item {current_offset}.")
-        user_offsets[chat_id] = 0
+    if not random_games:
+        await update.message.reply_text("The database is currently initializing. Please wait a moment.")
         return
 
-    response_chunk = ""
-    for name, link in games:
-        entry = f"🎮 {name}\n🔗 {link}\n\n"
-        if len(response_chunk) + len(entry) > 4000:
-            await update.message.reply_text(response_chunk)
-            response_chunk = ""
-        response_chunk += entry
-        
-    if response_chunk:
-        await update.message.reply_text(response_chunk)
-        
-    user_offsets[chat_id] += 50
-    await update.message.reply_text(f"✅ Showing items {current_offset + 1} - {current_offset + len(games)}. Click /more for the next batch.")
+    for name, link, old_price, new_price in random_games:
+        msg = (f"🎮 <b>{name}</b>\n"
+               f"💰 {old_price} ➡️ {new_price}\n"
+               f"🔗 {link}")
+        await update.message.reply_text(msg, parse_mode='HTML')
 
-async def more_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /more command triggered by the button or direct user input."""
-    chat_id = update.effective_chat.id
-    await send_games_batch(update, chat_id, start_fresh=False)
+async def post_init(application: Application):
+    """Captures the running event loop for the background thread."""
+    global bot_loop
+    bot_loop = asyncio.get_running_loop()
+    print("[Bot] Event loop captured for background alerts.")
 
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the general message (specifically the main button)."""
-    text = update.message.text
-    chat_id = update.effective_chat.id
-
-    if text == 'Discounted Steam Games':
-        await send_games_batch(update, chat_id, start_fresh=True)
-        
 
 if __name__ == '__main__':
     setup_database()
 
-    scraper_thread = threading.Thread(target=surveillance_loop, daemon=True)
-    scraper_thread.start()
-
-    BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+    BOT_TOKEN = "8496827253:AAFuBLX57cXp3UI125eSDY9C330AQLoopYI"
     
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print("ERROR: You must edit the file and insert your Telegram Bot Token!")
     else:
         print("--- Bot Starting ---")
-        application = Application.builder().token(BOT_TOKEN).build()
-        
+        bot_application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+        bot_application.add_handler(CommandHandler("start", start))
 
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("more", more_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        application.run_polling()
+
+        scraper_thread = threading.Thread(target=surveillance_loop, daemon=True)
+        scraper_thread.start()
+
+        bot_application.run_polling()

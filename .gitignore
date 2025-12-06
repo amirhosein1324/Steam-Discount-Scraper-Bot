@@ -1,2 +1,5 @@
 venv
 .env
+steam_sales.db-shm
+steam_sales.db-wal
+test.py
