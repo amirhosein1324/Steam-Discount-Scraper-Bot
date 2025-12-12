@@ -31,11 +31,29 @@ bot_application = None
 bot_loop = None
 
 def price_cleanup(price_str):
-    """Cleans up price strings by removing unwanted characters."""
+    """
+    Cleans up price strings by removing unwanted characters and isolating the actual price value.
+    
+    This function uses regex to aggressively strip non-price characters (like discount percentage 
+    remnants) from the start of the string, ensuring only the final currency string is returned.
+    """
     if not isinstance(price_str, str):
         return price_str
-    price_str = price_str.replace('%', '').strip()
-    return price_str
+    
+    # 1. Remove percentage signs
+    cleaned_str = price_str.replace('%', '').strip()
+    
+    # 2. Find the actual price string (digits/comma/dot + optional currency symbol like €, $, £, TL)
+    # This regex is designed to capture the core price value (e.g., "19,50€")
+    match = re.search(r'([\d,\.]+[€$£]|[\d,\.]+\s*TL|[\d,\.]+)[\s]*$', cleaned_str)
+    
+    if match:
+        return match.group(1).strip()
+    
+    # If no clear currency symbol is found, return the cleaned string as a fallback
+    # but strip any leading negative signs (from discount percentage remnants)
+    return re.sub(r'^\s*-\s*', '', cleaned_str).strip()
+
 
 def setup_database():
     """Initializes the SQLite database."""
@@ -140,7 +158,6 @@ def get_expected_count(driver):
     """Reads the 'X results match your search' text from Steam top header."""
     try:
         # Steam usually puts the count in a div class 'search_results_count'
-        # It looks like: "13,405 results match your search"
         count_element = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CLASS_NAME, "search_results_count"))
         )
@@ -217,28 +234,43 @@ def run_scraper_logic():
                 original_price = "N/A"
                 discount_price = "N/A"
                 
+                # Check for discounted price container
                 price_container = item.select_one('.search_price_discount_combined')
                 
-                if not price_container:
-                     price_container = item.select_one('.search_price')
-
                 if price_container:
-                     temp_soup = BeautifulSoup(str(price_container), 'html.parser')
-                     original_element = temp_soup.select_one('strike')
-                     
-                     if original_element:
-                         original_price = price_cleanup(original_element.text)
-                         original_element.decompose()
-                         
-                         percent_element = temp_soup.select_one('.search_discount_percentage')
-                         if percent_element:
-                             percent_element.decompose()
-                             
-                         discount_price = price_cleanup(temp_soup.get_text())
-                         
-                     else:
-                         discount_price = price_cleanup(price_container.get_text())
-                         original_price = discount_price 
+                    # Discounted item
+                    
+                    # 1. Get original price (strike-through)
+                    original_element = price_container.select_one('strike')
+                    if original_element:
+                        original_price = price_cleanup(original_element.text)
+                        
+                        # 2. Get the discounted price (final price is usually the last text string)
+                        # Split by space and clean the last non-empty piece of text
+                        all_texts = [t.strip() for t in price_container.get_text().split()]
+                        # Filter out discount percentage strings (starting with -) and get the last price
+                        final_price_candidates = [t for t in all_texts if not t.startswith('-') and t and t not in original_price]
+                        
+                        if final_price_candidates:
+                            discount_price = price_cleanup(final_price_candidates[-1])
+                        else:
+                            # Fallback to the last cleaned text if explicit filtering fails
+                            discount_price = price_cleanup(all_texts[-1] if all_texts else "N/A")
+                        
+                    else:
+                        # Fallback for non-discounted items that might use this container for some reason
+                        price_element = item.select_one('.search_price')
+                        if price_element:
+                            discount_price = price_cleanup(price_element.get_text())
+                            original_price = discount_price
+                            
+                else:
+                    # Non-discounted item (or structure is different)
+                    price_element = item.select_one('.search_price')
+                    if price_element:
+                        discount_price = price_cleanup(price_element.get_text())
+                        original_price = discount_price
+
 
                 scraped_data.append({
                     'name': game_name,
@@ -247,7 +279,8 @@ def run_scraper_logic():
                     'discount_price': discount_price,
                     'scrape_date': current_date
                 })
-            except:
+            except Exception as item_e:
+                # print(f"Error scraping item: {item_e}") # Optional: debug specific item failures
                 continue
                 
         return scraped_data
@@ -260,31 +293,31 @@ def run_scraper_logic():
             driver.quit()
 
 async def broadcast_alert(new_games):
-    """Sends a message to all subscribed users about new games."""
+    """
+    Sends a single summary message to all subscribed users about new games.
+    
+    This function has been modified to always send a summary alert, fulfilling the request 
+    to not send individual game details via the recurring surveillance loop.
+    """
     if not bot_application:
         return
         
-    print(f"[Alert] Sending alerts to {len(subscribed_users)} users for {len(new_games)} new games.")
+    num_new_games = len(new_games)
     
-    if len(new_games) > 20:
-        msg = f"🚨 <b>Surveillance Update:</b> {len(new_games)} new discounted games detected!\nCheck the bot for details."
-        for chat_id in subscribed_users:
-            try:
-                await bot_application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-            except:
-                pass
-    else:
-        for game in new_games:
-            msg = (f"🚨 <b>NEW DISCOUNT DETECTED!</b>\n\n"
-                   f"🎮 {game['name']}\n"
-                   f"💰 {game['original_price']} ➡️ {game['discount_price']}\n"
-                   f"🔗 {game['steam_link']}")
-            
-            for chat_id in subscribed_users:
-                try:
-                    await bot_application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
-                except Exception as e:
-                    print(f"Failed to send to {chat_id}: {e}")
+    if num_new_games == 0:
+        return # Do not send anything if no new games found
+        
+    print(f"[Alert] Sending alerts to {len(subscribed_users)} users for {num_new_games} new games.")
+    
+    # Send a single summary alert message
+    msg = (f"🚨 <b>Steam Sales Alert:</b> {num_new_games} new discounted game{'s' if num_new_games > 1 else ''} detected!\n\n"
+           f"Use the /start command to see a few random current deals.")
+    
+    for chat_id in subscribed_users:
+        try:
+            await bot_application.bot.send_message(chat_id=chat_id, text=msg, parse_mode='HTML')
+        except Exception as e:
+            print(f"Failed to send to {chat_id}: {e}")
 
 def surveillance_loop():
     """Runs the scraper and triggers alerts."""
@@ -296,17 +329,17 @@ def surveillance_loop():
         if data:
             new_arrivals, previous_count = save_new_data(data)
             
+            # Only alert if new games are found AND there was previous data (to prevent false alerts on first run)
             if new_arrivals and previous_count > 0:
                 if bot_application and bot_loop:
                     asyncio.run_coroutine_threadsafe(broadcast_alert(new_arrivals), bot_loop)
             
             print(f"[Surveillance] Sleeping for {SURVEILLANCE_INTERVAL} seconds...")
+            time.sleep(SURVEILLANCE_INTERVAL)
         else:
             print("[Surveillance] Scrape failed or aborted. Retrying in 60 seconds...")
             time.sleep(60)
             continue
-            
-        time.sleep(SURVEILLANCE_INTERVAL)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -316,7 +349,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "👋 Welcome! You are now subscribed to Steam Sales Surveillance.\n"
-        "You will receive alerts whenever NEW discounts appear.\n\n"
+        "You will receive general alerts whenever NEW discounts appear.\n\n"
         "🎲 Here are 5 random deals from the vault right now:"
     )
     
@@ -328,6 +361,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for name, link, old_price, new_price in random_games:
+        # Note: The output formatting here uses the cleaned prices
         msg = (f"🎮 <b>{name}</b>\n"
                f"💰 {old_price} ➡️ {new_price}\n"
                f"🔗 {link}")
