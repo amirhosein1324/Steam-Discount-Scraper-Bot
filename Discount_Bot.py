@@ -22,8 +22,6 @@ DATABASE_NAME = 'steam_sales.db'
 URL = 'https://store.steampowered.com/search/?supportedlang=english&specials=1&ndl=1'
 SCROLL_PAUSE_TIME = 2.0
 SURVEILLANCE_INTERVAL = 1800
-# SAFETY THRESHOLD: The scrape must retrieve at least this % of the total games reported by Steam
-# to be considered valid. (0.9 = 90%). Prevents partial scrapes from wiping the DB.
 SCRAPE_TOLERANCE = 0.90 
 
 subscribed_users = set()
@@ -31,32 +29,25 @@ bot_application = None
 bot_loop = None
 
 def price_cleanup(price_str):
-    """
-    Cleans up price strings by removing unwanted characters and isolating the actual price value.
     
-    This function uses regex to aggressively strip non-price characters (like discount percentage 
-    remnants) from the start of the string, ensuring only the final currency string is returned.
-    """
+    
+    
+    
     if not isinstance(price_str, str):
         return price_str
     
-    # 1. Remove percentage signs
     cleaned_str = price_str.replace('%', '').strip()
     
-    # 2. Find the actual price string (digits/comma/dot + optional currency symbol like €, $, £, TL)
-    # This regex is designed to capture the core price value (e.g., "19,50€")
     match = re.search(r'([\d,\.]+[€$£]|[\d,\.]+\s*TL|[\d,\.]+)[\s]*$', cleaned_str)
     
     if match:
         return match.group(1).strip()
     
-    # If no clear currency symbol is found, return the cleaned string as a fallback
-    # but strip any leading negative signs (from discount percentage remnants)
     return re.sub(r'^\s*-\s*', '', cleaned_str).strip()
 
 
 def setup_database():
-    """Initializes the SQLite database."""
+    
     conn = sqlite3.connect(DATABASE_NAME)
     conn.execute('PRAGMA journal_mode=WAL;')
     cursor = conn.cursor()
@@ -75,7 +66,7 @@ def setup_database():
     print(f"Database '{DATABASE_NAME}' set up successfully (WAL Mode Enabled).")
 
 def get_existing_links():
-    """Fetches all existing Steam links to compare for new arrivals."""
+    
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT steam_link FROM sales")
@@ -84,16 +75,16 @@ def get_existing_links():
     return links
 
 def save_new_data(data):
-    """Saves data. Returns a list of NEW games that weren't in the DB before."""
+    
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     
     existing_links = get_existing_links()
     
+    previous_count = len(existing_links)
     new_arrivals = []
     
     try:
-        # Wipe old data only because we confirmed 'data' is a complete set in run_scraper_logic
         cursor.execute('DELETE FROM sales')
         
         insert_sql = '''
@@ -116,7 +107,15 @@ def save_new_data(data):
         
         cursor.executemany(insert_sql, records_to_insert)
         conn.commit()
-        print(f"[DB] Saved {len(records_to_insert)} games. Found {len(new_arrivals)} NEW discounts.")
+        
+        
+        current_scrape_count = len(records_to_insert)
+        if current_scrape_count > 0 and previous_count < (current_scrape_count * SCRAPE_TOLERANCE):
+             print(f"[DB] Saved {current_scrape_count} games. Previous DB size ({previous_count}) was too small to generate meaningful alerts. Suppressing 'NEW' alerts.")
+             new_arrivals = [] 
+        else:
+             print(f"[DB] Saved {current_scrape_count} games. Found {len(new_arrivals)} NEW discounts.")
+
         
     except Exception as e:
         print(f"[DB Error] Failed to save data: {e}")
@@ -124,10 +123,10 @@ def save_new_data(data):
     finally:
         conn.close()
         
-    return new_arrivals, len(existing_links)
+    return new_arrivals, previous_count
 
 def get_random_games_sync(limit=5):
-    """Fetches 5 random games."""
+    
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT game_name, steam_link, original_price, discount_price FROM sales ORDER BY RANDOM() LIMIT ?", (limit,))
@@ -155,14 +154,14 @@ def initialize_selenium():
         return None
 
 def get_expected_count(driver):
-    """Reads the 'X results match your search' text from Steam top header."""
+    
     try:
-        # Steam usually puts the count in a div class 'search_results_count'
+        
         count_element = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.CLASS_NAME, "search_results_count"))
         )
         text = count_element.text.strip()
-        # Extract number using regex (removes commas and text)
+        
         match = re.search(r'([\d,]+)', text)
         if match:
             number_str = match.group(1).replace(',', '')
@@ -172,7 +171,7 @@ def get_expected_count(driver):
     return 0
 
 def run_scraper_logic():
-    """Scrapes Steam Search Results including Prices with Safety Checks."""
+    
     driver = initialize_selenium()
     if not driver:
         return []
@@ -182,7 +181,7 @@ def run_scraper_logic():
         driver.get(URL)
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "search_resultsRows")))
         
-        # --- NEW SAFETY CHECK STEP 1: Get Expected Count ---
+        
         expected_total = get_expected_count(driver)
         print(f"[Scraper] Steam reports {expected_total} total discounted games available.")
 
@@ -214,13 +213,13 @@ def run_scraper_logic():
         scraped_count = len(sales_items)
         print(f"[Scraper] Physically scraped {scraped_count} items.")
 
-        # --- NEW SAFETY CHECK STEP 2: Verify Count ---
+        
         if expected_total > 0:
-            # Check if we scraped at least 90% of what Steam said exists
+            
             if scraped_count < (expected_total * SCRAPE_TOLERANCE):
                 print(f"🚨 [SAFETY ABORT] Scrape incomplete! Expected ~{expected_total}, but found {scraped_count}.")
                 print("   Database update cancelled to prevent false 'new game' alerts.")
-                return [] # Return empty to prevent database update
+                return [] 
         
         scraped_data = []
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -234,38 +233,37 @@ def run_scraper_logic():
                 original_price = "N/A"
                 discount_price = "N/A"
                 
-                # Check for discounted price container
+                
                 price_container = item.select_one('.search_price_discount_combined')
                 
                 if price_container:
-                    # Discounted item
                     
-                    # 1. Get original price (strike-through)
+                    
+                    
                     original_element = price_container.select_one('strike')
                     if original_element:
                         original_price = price_cleanup(original_element.text)
                         
-                        # 2. Get the discounted price (final price is usually the last text string)
-                        # Split by space and clean the last non-empty piece of text
+                        
                         all_texts = [t.strip() for t in price_container.get_text().split()]
-                        # Filter out discount percentage strings (starting with -) and get the last price
+                        
                         final_price_candidates = [t for t in all_texts if not t.startswith('-') and t and t not in original_price]
                         
                         if final_price_candidates:
                             discount_price = price_cleanup(final_price_candidates[-1])
                         else:
-                            # Fallback to the last cleaned text if explicit filtering fails
+                            
                             discount_price = price_cleanup(all_texts[-1] if all_texts else "N/A")
                         
                     else:
-                        # Fallback for non-discounted items that might use this container for some reason
+                        
                         price_element = item.select_one('.search_price')
                         if price_element:
                             discount_price = price_cleanup(price_element.get_text())
                             original_price = discount_price
                             
                 else:
-                    # Non-discounted item (or structure is different)
+                    
                     price_element = item.select_one('.search_price')
                     if price_element:
                         discount_price = price_cleanup(price_element.get_text())
@@ -280,7 +278,7 @@ def run_scraper_logic():
                     'scrape_date': current_date
                 })
             except Exception as item_e:
-                # print(f"Error scraping item: {item_e}") # Optional: debug specific item failures
+                
                 continue
                 
         return scraped_data
@@ -293,23 +291,21 @@ def run_scraper_logic():
             driver.quit()
 
 async def broadcast_alert(new_games):
-    """
-    Sends a single summary message to all subscribed users about new games.
     
-    This function has been modified to always send a summary alert, fulfilling the request 
-    to not send individual game details via the recurring surveillance loop.
-    """
+    
+    
+    
     if not bot_application:
         return
         
     num_new_games = len(new_games)
     
     if num_new_games == 0:
-        return # Do not send anything if no new games found
+        return 
         
     print(f"[Alert] Sending alerts to {len(subscribed_users)} users for {num_new_games} new games.")
     
-    # Send a single summary alert message
+    
     msg = (f"🚨 <b>Steam Sales Alert:</b> {num_new_games} new discounted game{'s' if num_new_games > 1 else ''} detected!\n\n"
            f"Use the /start command to see a few random current deals.")
     
@@ -320,17 +316,17 @@ async def broadcast_alert(new_games):
             print(f"Failed to send to {chat_id}: {e}")
 
 def surveillance_loop():
-    """Runs the scraper and triggers alerts."""
+    
     print("--- Surveillance System Started ---")
     while True:
         data = run_scraper_logic()
         
-        # Only proceed if data is not empty (empty means scrape failed or safety check aborted)
+        
         if data:
             new_arrivals, previous_count = save_new_data(data)
             
-            # Only alert if new games are found AND there was previous data (to prevent false alerts on first run)
-            if new_arrivals and previous_count > 0:
+            
+            if new_arrivals: 
                 if bot_application and bot_loop:
                     asyncio.run_coroutine_threadsafe(broadcast_alert(new_arrivals), bot_loop)
             
@@ -343,7 +339,7 @@ def surveillance_loop():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Subscribes user and sends 5 random games."""
+    
     chat_id = update.effective_chat.id
     subscribed_users.add(chat_id)
     
@@ -361,14 +357,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for name, link, old_price, new_price in random_games:
-        # Note: The output formatting here uses the cleaned prices
+        
         msg = (f"🎮 <b>{name}</b>\n"
                f"💰 {old_price} ➡️ {new_price}\n"
                f"🔗 {link}")
         await update.message.reply_text(msg, parse_mode='HTML')
 
 async def post_init(application: Application):
-    """Captures the running event loop for the background thread."""
+    
     global bot_loop
     bot_loop = asyncio.get_running_loop()
     print("[Bot] Event loop captured for background alerts.")
