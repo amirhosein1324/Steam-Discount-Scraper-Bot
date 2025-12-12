@@ -61,9 +61,23 @@ def setup_database():
             scrape_date TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            chat_id INTEGER PRIMARY KEY
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"Database '{DATABASE_NAME}' set up successfully (WAL Mode Enabled).")
+
+def load_subscriptions():
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT chat_id FROM subscriptions")
+    global subscribed_users
+    subscribed_users = {row[0] for row in cursor.fetchall()}
+    conn.close()
+    print(f"[DB] Loaded {len(subscribed_users)} existing subscriptions.")
 
 def get_existing_links():
     
@@ -130,6 +144,15 @@ def get_random_games_sync(limit=5):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT game_name, steam_link, original_price, discount_price FROM sales ORDER BY RANDOM() LIMIT ?", (limit,))
+    results = cursor.fetchall()
+    conn.close()
+    return results
+
+def get_latest_games_sync(limit=10):
+    
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT game_name, steam_link, original_price, discount_price FROM sales ORDER BY id DESC LIMIT ?", (limit,))
     results = cursor.fetchall()
     conn.close()
     return results
@@ -307,7 +330,7 @@ async def broadcast_alert(new_games):
     
     
     msg = (f"🚨 <b>Steam Sales Alert:</b> {num_new_games} new discounted game{'s' if num_new_games > 1 else ''} detected!\n\n"
-           f"Use the /start command to see a few random current deals.")
+           f"Use the /latest_deals command to see the top 10 newest deals or /start for random deals.")
     
     for chat_id in subscribed_users:
         try:
@@ -341,12 +364,19 @@ def surveillance_loop():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     chat_id = update.effective_chat.id
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO subscriptions (chat_id) VALUES (?)", (chat_id,))
+    conn.commit()
+    conn.close()
+
     subscribed_users.add(chat_id)
     
     await update.message.reply_text(
         "👋 Welcome! You are now subscribed to Steam Sales Surveillance.\n"
         "You will receive general alerts whenever NEW discounts appear.\n\n"
-        "🎲 Here are 5 random deals from the vault right now:"
+        "🎲 Here are 5 random deals from the vault right now. Use /latest_deals for the newest additions."
     )
     
     loop = asyncio.get_running_loop()
@@ -363,6 +393,40 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"🔗 {link}")
         await update.message.reply_text(msg, parse_mode='HTML')
 
+async def latest_deals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    await update.message.reply_text("Fetching the 10 most recently scraped discounted games...")
+    
+    loop = asyncio.get_running_loop()
+    latest_games = await loop.run_in_executor(None, partial(get_latest_games_sync, limit=10))
+    
+    if not latest_games:
+        await update.message.reply_text("No sales data available yet. Please wait for the scraper to complete its first run.")
+        return
+
+    for name, link, old_price, new_price in latest_games:
+        msg = (f"🎮 <b>{name}</b>\n"
+               f"💰 {old_price} ➡️ {new_price}\n"
+               f"🔗 {link}")
+        await update.message.reply_text(msg, parse_mode='HTML')
+    
+    await update.message.reply_text(f"This is a sample of the most recent deals. Use /start for random deals.")
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+
+    if chat_id in subscribed_users:
+        subscribed_users.remove(chat_id)
+        await update.message.reply_text("😢 You have been unsubscribed from Steam Sales alerts. Use /start to resubscribe anytime.")
+    else:
+        await update.message.reply_text("You are not currently subscribed. Use /start to receive alerts.")
+
 async def post_init(application: Application):
     
     global bot_loop
@@ -372,6 +436,7 @@ async def post_init(application: Application):
 
 if __name__ == '__main__':
     setup_database()
+    load_subscriptions()
 
     BOT_TOKEN = "8496827253:AAFuBLX57cXp3UI125eSDY9C330AQLoopYI"
     
@@ -381,6 +446,8 @@ if __name__ == '__main__':
         print("--- Bot Starting ---")
         bot_application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         bot_application.add_handler(CommandHandler("start", start))
+        bot_application.add_handler(CommandHandler("cancel", cancel))
+        bot_application.add_handler(CommandHandler("latest_deals", latest_deals))
 
         scraper_thread = threading.Thread(target=surveillance_loop, daemon=True)
         scraper_thread.start()
