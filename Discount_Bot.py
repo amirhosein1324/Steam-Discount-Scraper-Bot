@@ -257,40 +257,65 @@ def run_scraper_logic():
                 discount_price = "N/A"
                 
                 
-                price_container = item.select_one('.search_price_discount_combined')
                 
-                if price_container:
+                price_element = item.select_one('.search_price')
+                
+                if price_element:
                     
                     
+                    original_element = price_element.select_one('strike')
                     
-                    original_element = price_container.select_one('strike')
                     if original_element:
+                        
                         original_price = price_cleanup(original_element.text)
                         
                         
-                        all_texts = [t.strip() for t in price_container.get_text().split()]
                         
-                        final_price_candidates = [t for t in all_texts if not t.startswith('-') and t and t not in original_price]
+                        discount_price_parts = []
+                        for content in price_element.contents:
+                            if isinstance(content, str) and content.strip():
+                                discount_price_parts.append(content.strip())
+                            
                         
-                        if final_price_candidates:
-                            discount_price = price_cleanup(final_price_candidates[-1])
+                        
+                        
+                        
+                        if discount_price_parts:
+                            discount_price = price_cleanup(discount_price_parts[-1])
                         else:
                             
-                            discount_price = price_cleanup(all_texts[-1] if all_texts else "N/A")
+                            combined_text_container = item.select_one('.search_price_discount_combined')
+                            if combined_text_container:
+                                full_text = combined_text_container.get_text()
+                                
+                                
+                                
+                                
+                                
+                                
+                                
+                                
+                                
+                                
+                                discount_text_raw = full_text.replace(original_element.text, '').split()
+                                
+                                
+                                discount_price = price_cleanup(discount_text_raw[-1]) if discount_text_raw else 'N/A'
+                            else:
+                                all_texts = [t.strip() for t in price_element.get_text().split()]
+                                discount_price = price_cleanup(all_texts[-1]) if all_texts else 'N/A'
+                            
                         
                     else:
                         
-                        price_element = item.select_one('.search_price')
-                        if price_element:
-                            discount_price = price_cleanup(price_element.get_text())
-                            original_price = discount_price
-                            
-                else:
-                    
-                    price_element = item.select_one('.search_price')
-                    if price_element:
-                        discount_price = price_cleanup(price_element.get_text())
-                        original_price = discount_price
+                        full_price_text = price_element.get_text().strip()
+                        discount_price = price_cleanup(full_price_text)
+                        original_price = discount_price 
+                        
+                        
+                        if "free" in full_price_text.lower():
+                            original_price = "N/A"
+                            discount_price = "Free"
 
 
                 scraped_data.append({
