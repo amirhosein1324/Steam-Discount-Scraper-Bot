@@ -2,7 +2,7 @@ import time
 import sqlite3
 import threading
 import asyncio
-import random
+import re
 from datetime import datetime
 from bs4 import BeautifulSoup
 from functools import partial
@@ -15,13 +15,16 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 DATABASE_NAME = 'steam_sales.db'
 URL = 'https://store.steampowered.com/search/?supportedlang=english&specials=1&ndl=1'
 SCROLL_PAUSE_TIME = 2.0
 SURVEILLANCE_INTERVAL = 1800
+# SAFETY THRESHOLD: The scrape must retrieve at least this % of the total games reported by Steam
+# to be considered valid. (0.9 = 90%). Prevents partial scrapes from wiping the DB.
+SCRAPE_TOLERANCE = 0.90 
 
 subscribed_users = set()
 bot_application = None
@@ -35,7 +38,7 @@ def price_cleanup(price_str):
     return price_str
 
 def setup_database():
-    """Initializes the SQLite database with price columns."""
+    """Initializes the SQLite database."""
     conn = sqlite3.connect(DATABASE_NAME)
     conn.execute('PRAGMA journal_mode=WAL;')
     cursor = conn.cursor()
@@ -72,6 +75,7 @@ def save_new_data(data):
     new_arrivals = []
     
     try:
+        # Wipe old data only because we confirmed 'data' is a complete set in run_scraper_logic
         cursor.execute('DELETE FROM sales')
         
         insert_sql = '''
@@ -132,8 +136,26 @@ def initialize_selenium():
         print(f"[Scraper Error] Driver init failed: {e}")
         return None
 
+def get_expected_count(driver):
+    """Reads the 'X results match your search' text from Steam top header."""
+    try:
+        # Steam usually puts the count in a div class 'search_results_count'
+        # It looks like: "13,405 results match your search"
+        count_element = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CLASS_NAME, "search_results_count"))
+        )
+        text = count_element.text.strip()
+        # Extract number using regex (removes commas and text)
+        match = re.search(r'([\d,]+)', text)
+        if match:
+            number_str = match.group(1).replace(',', '')
+            return int(number_str)
+    except Exception as e:
+        print(f"[Scraper Warning] Could not detect total result count: {e}")
+    return 0
+
 def run_scraper_logic():
-    """Scrapes Steam Search Results including Prices."""
+    """Scrapes Steam Search Results including Prices with Safety Checks."""
     driver = initialize_selenium()
     if not driver:
         return []
@@ -143,6 +165,10 @@ def run_scraper_logic():
         driver.get(URL)
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "search_resultsRows")))
         
+        # --- NEW SAFETY CHECK STEP 1: Get Expected Count ---
+        expected_total = get_expected_count(driver)
+        print(f"[Scraper] Steam reports {expected_total} total discounted games available.")
+
         last_height = driver.execute_script("return document.body.scrollHeight")
         retries = 0
         
@@ -152,7 +178,6 @@ def run_scraper_logic():
             new_height = driver.execute_script("return document.body.scrollHeight")
             
             if new_height == last_height:
-
                 if retries < 3:
                     retries += 1
                     print(f"[Scraper] Page stuck (Retry {retries}/3)... waiting longer...")
@@ -162,16 +187,23 @@ def run_scraper_logic():
                     print("[Scraper] Reached bottom of page.")
                     break
             
-            
             retries = 0
             last_height = new_height
         
-
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
         sales_items = soup.select('#search_resultsRows a.search_result_row')
         
-        print(f"[Scraper] Found {len(sales_items)} items. Extracting prices...")
+        scraped_count = len(sales_items)
+        print(f"[Scraper] Physically scraped {scraped_count} items.")
+
+        # --- NEW SAFETY CHECK STEP 2: Verify Count ---
+        if expected_total > 0:
+            # Check if we scraped at least 90% of what Steam said exists
+            if scraped_count < (expected_total * SCRAPE_TOLERANCE):
+                print(f"🚨 [SAFETY ABORT] Scrape incomplete! Expected ~{expected_total}, but found {scraped_count}.")
+                print("   Database update cancelled to prevent false 'new game' alerts.")
+                return [] # Return empty to prevent database update
         
         scraped_data = []
         current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -196,8 +228,6 @@ def run_scraper_logic():
                      
                      if original_element:
                          original_price = price_cleanup(original_element.text)
-                         
-
                          original_element.decompose()
                          
                          percent_element = temp_soup.select_one('.search_discount_percentage')
@@ -262,17 +292,17 @@ def surveillance_loop():
     while True:
         data = run_scraper_logic()
         
+        # Only proceed if data is not empty (empty means scrape failed or safety check aborted)
         if data:
             new_arrivals, previous_count = save_new_data(data)
             
-
             if new_arrivals and previous_count > 0:
                 if bot_application and bot_loop:
                     asyncio.run_coroutine_threadsafe(broadcast_alert(new_arrivals), bot_loop)
             
             print(f"[Surveillance] Sleeping for {SURVEILLANCE_INTERVAL} seconds...")
         else:
-            print("[Surveillance] Scrape failed. Retrying in 60 seconds...")
+            print("[Surveillance] Scrape failed or aborted. Retrying in 60 seconds...")
             time.sleep(60)
             continue
             
@@ -313,7 +343,7 @@ async def post_init(application: Application):
 if __name__ == '__main__':
     setup_database()
 
-    BOT_TOKEN = "your_telegram_bot_token_here"
+    BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
     
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print("ERROR: You must edit the file and insert your Telegram Bot Token!")
@@ -321,7 +351,6 @@ if __name__ == '__main__':
         print("--- Bot Starting ---")
         bot_application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
         bot_application.add_handler(CommandHandler("start", start))
-
 
         scraper_thread = threading.Thread(target=surveillance_loop, daemon=True)
         scraper_thread.start()
