@@ -1,228 +1,84 @@
-# Steam Sales Surveillance Telegram Bot
+# Steam Discount Bot
 
-This is a simple Python project that watches Steam discount games and lets you browse them through a Telegram bot. It scrapes the Steam specials page, saves the games into a local SQLite database, and then sends them to you in Telegram in batches of 50.
+This is a Steam Sale Surveillance System. It is a Python-based Telegram bot that continuously scrapes the Steam store for "Special" discounts , maintains a database of sales, and alerts subscribed users about new deals.
 
----
-
-## What this project does
-
-- Opens the Steam Specials page with Selenium and scrolls down until all discounted games are loaded.
-  
-- Uses BeautifulSoup to parse the page and get each game’s name and Steam link.
-  
-- Saves all scraped games into a local SQLite database file called `steam_sales.db`.
-
-- Runs a background “surveillance” loop that refreshes the database every 30 minutes.
-  
-- Provides a Telegram bot with:
-  - a button to get discounted Steam games from the database.
-  - a `/more` command to load the next 50 games til the end.
-  - price section that gives discounted price to user
+It features `background scraping`, `duplicate detection`, and `targeted game tracking` .
 
 ---
 
-## Main components
+## Features
 
-### Scraper
-
-- `initialize_selenium()` sets up a Chrome browser with some options and starts it using `webdriver_manager`, so you don’t need to manually download the ChromeDriver.
-
-- `run_scraper_logic()`:
-  - Opens the Steam specials URL.
-  
-  - Waits until the search results element is present.
-  
-  - Scrolls the page down in a loop until the page height stops changing (infinite scroll handling).
-  
-  - Uses BeautifulSoup to select each game row and extract:
-    - Game title.
-    - Game Price
-    - Steam link.
-    
-  - Puts all games into a list of dictionaries along with the current scrape date.
-
-### Database
-
-- The SQLite database filename is: `steam_sales.db`.
-
-- `setup_database()`:
- - Creates the`sales` table if it doesnt exist.
- 
- - Enables WAL (Write-Ahead Logging) mode for better concurrent reads/writes.
- 
-- The `sales` table has:
- - id (primary key auto-increment).
- - game_name (text).
- - game price
- - steam_link (text).
- - scrape_date (text).
- 
--clear_and_save_data:
- - Deletes all old rows in sales.
- - Inserts the new scraped games in bulk.
- - gives new discounted games to user
- 
-- `get_games_from_db_sync(limit, offset)`:
- - Returns a list of (game_name, steam_link) rows using the given limit and offset.
-
- 
-- `get_total_count_sync()`:
- - returns all games that are stored in the sales table.
-
-### Surveillance loop
-
-- `surveillance_loop()` runs forever in a background thread.
-- It:
-  - Calls `run_scraper_logic()` to scrape Steam.
-  
-  - If scraping returned data, it calls `clear_and_save_data(data)` to refresh the DB.
-  
-  - Sleeps for `SURVEILLANCE_INTERVAL` seconds (default: 1800 seconds = 30 minutes).
-  
-  - If scraping fails, it sleeps 60 seconds and tries again.
-  
-  - Sends new discounted games to user.
+* Duplicate Prevention: Automated Surveillance:  runs a Selenium scraper every 30 minutes to detect new discounts.
+* Smart Infinite Scroll: the system automatically scrolls the Steam search page to load all available results.
+* It uses SQLite to store deal history, ensuring users are not notified twice for the same sale.
+* Game Watchlist: Users can subscribe to specific game titles (for example, "Elden Ring") and get priority alerts.
+* Throttled Notifications: The system uses a job queue to send alerts sequentially (one information every 10 seconds), in order to avoid spamming or hitting API limits.
+* Live Commands: The system fetches random deals or the latest scraped deals on command.
 
 ---
 
-## Telegram bot logic
+## Installation & Setup
 
-This bot utilizes the async version of `python-telegram-bot` (Application class and async handler).
+### 1.things we need
+* Python 3.8+
+* Google Chrome (required for the Selenium WebDriver)
+* A Telegram Bot Token (from : [@BotFather](https://t.me/BotFather))
 
--`start(update, context)`:
- -Sends a welcome message.
- 
- -Shows a custom keyboard with:
-  -`Discounted Steam Games`
-  -`/more`
-  
- -Sets the users offset to 0 in the`user_offsets`dictionary.
+### 2. Install Dependencies
+This project relies on `selenium` , `beautifulsoup4` , `webdriver-manager` , and `python-telegram-bot`.
 
-- send_games_batch (update , chat_id , start_fresh = False):
+Important: You must install the `job-queue` extra for the Telegram library.
 
- - If `start_fresh` is True or the user is new:
-  -Resets the  offset for that chat to 0.
-  
-  - Gets the total game count from the database.
-  
-  - If the DB(database) is empty, tells the user to wait until the first scrape completes.
-  
-  - Otherwise, tells the user how many games were found and that it is sending the first 50.
-  
- - Uses `asyncio.get_running_loop().run_in_executor`to call the blocking DB functions without freezing the bot.
- 
- - reads 50 games from the DB starting at the current offset.
- 
- - builds message chunks with each game in the format:
-  -`Game_Name`
-  -`Game Price`
-  -`Game_Link`
-  
- - makes sure each message is under 4000 characters (for  telegram message limits).
- 
- - Sends the chunks to the user.
- 
- - Increases the user’s offset by 50 and sends a small status message and  which range was sent.
+```bash
+pip install "python-telegram-bot[job-queue]" , selenium  , beautifulsoup4 , webdriver-manager 
+```
 
-
-
-- `more_command(update, context)`:
- - Called when the user sends `/more`.
- 
- - Calls`send_games_batch`with start_fresh = False to load the next 50 games for that chat.
- 
-- `handle_message(update, context)`:
-
- -  checks the text of messages.
- 
- - If the user pressed `Discounted_Steam_Games` button ,  it calls send_games_batch with start_fresh=True to restart the list from the beginning.
- 
-- `user_offsets`:
- -a simple dictionary that stores the current offset(how many games have already been shown) for each chat ID.
+### 3.Configuration
+Open Discount_Bot.py.
+Scroll to the bottom of the file (approx line 430).
+Replace the placeholder string with your actual Telegram Bot Token:
+# Find this line:
+BOT_TOKEN = "PASTE YOUR TELEGRAM BOT TOKEN HERE"
 
 ---
 
-## How the script starts
+# 🤖 Steam Discount Bot Command Cheat Sheet
 
-at the bottom of our file:
-- if __name__ == '__main__':
+Reference guide for controlling the Steam Discount Bot.
 
- - calls setup_database() to ensure the database and table exist and WAL mode is enabled.
- 
- - starts the thread:
- 
-  - scraper_thread = threading.Thread(target = surveillance_loop , daemon=True)
-  
-  - scraper_thread.start()
- - Defines `BOT_TOKEN  =  "YOUR_TELEGRAM_BOT_TOKEN" `:
- 
-  - You must replace this with your actual token from BotFather.
-  
- - If `BOT_TOKEN` is not changed , it prints an error and our bot will not start.
+## 📋 Command List
 
- - If token is valid:
-  - Builds the application with  application.builder().token(BOT_TOKEN).build().
-  
-  - adds some handlers for bot:
-  
-   - CommandHandler("start", start)
-   - CommandHandler("more", more_command)
-   - MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
-   
-  - Runs the bot with `application.run_polling().
-    
----
-
-## Requirements
-
-You need:
-
-- Python 3.
-- Google Chrome (or Chromium) installed (so Selenium can control a browser).
-- The following Python packages (install via `pip`):
-  pip install selenium  ,   webdriver-manager  , beautifulsoup4  ,  python-telegram-bot
-
-
-
-SQLite is built into Python, so you don’t need to install it separately.
+| Command | Description |
+| :--- | :--- |
+| **/start** | **Initialize & Subscribe.** Subscribes you to the general alerts feed. You will receive notifications for *all* newly detected sales found during the 30-minute scan cycle. Also sends 5 random deals immediately. |
+| **/latest_deals** | **View Recent Finds.** Fetches and displays the 10 most recently scraped discounted games from the database. Useful to check activity without waiting for a scan. |
+| **/subscribe_game** | **Track Specific Title.** Starts a conversation to watch a specific game. <br>1. Type `/subscribe_game`<br>2. Bot asks for name.<br>3. Type name (example `Hades`)<br>4 . bot confirms or alerts if already on sale. |
+| **/cancel** | **Nuke Subscriptions.** Unsubscribes you from EVERYTHING. Stops general sale alerts AND removes all specific game watches you have set up. |
+| **/help**  | **Show Help.** Displays the built-in help message with a summary of these commands. |
 
 ---
 
-## How to run
 
-1. **Clone or copy the script**  
-   Save the script as something like `steam_sales_bot.py`.
-
-2. **Install dependencies**  
-   Install the required libraries using `pip`.
-
-3. **Create your bot and get token**  
-   - Open Telegram and search for `@BotFather`.  
-   - Create a new bot and copy the token it gives you.
-   - In the script, replace: with your real token.
-
-4. **Run the script**
-   python steam_sales_bot.py
+## How It Works (Technical Breakdown)
+1.The Scraper Method:
+- Logic: It utilizes Selenium with a headless Chrome browser.
+- The script navigates to the Steam specials URL. Since Steam employs "infinite scroll," the script executes JavaScript (window.scrollTo) repeatedly until the page height stops increasing.
+- Safety: It compares the number of scraped items against the "X results match your search" text on Steam. If the scraped count is less than 90% (SCRAPE_TOLERANCE) of the expected count, the scrape is aborted to prevent database corruption.
 
 
-The console should show that the database is set up and that the surveillance system started. If the token is correct, it will print that the bot is starting and begin polling for updates.
+2.The Database (steam_sales.db):
+- The bot uses SQLite with three main tables:
+- sales: Stores game_name, steam_link, and scrape_date.
+- subscriptions: Stores Chat IDs for users receiving general alerts.
+- game_subscriptions: Stores specific game names users are watching (for example, User 123 is watching "Red Dead Redemption").
 
-5. **Use the bot**
+3. Threading and concurrency
+- Main Thread : Runs the bot_application.run_polling() loop to handle Telegram user messages.
+- scraper Thread : A daemon thread (scraper_thread) runs surveillance_loop. It sleeps for 30 minutes , scrapes, updates the DB, and then sleeps again.
+- async bridge : When the background thread finds new games, it uses asyncio.run_coroutine_threadsafe to inject the alert logic back into the main AsyncIO loop used by the Telegram bot.
 
-- Open your bot in the Telegram app.
-- Type or tap `/start`.
-- Press the `Discounted Steam Games` button to get the first 50 games (wait a bit after first run so the scraper can fill the database).
-- Use `/more` to get the next 50 games.
-
----
-
-## Notes and ideas for improvement
-
-- Right now, it only handles English Steam specials based on the given URL.
-- The database is wiped and fully refreshed every cycle (no history of old sales is kept).
-- You could extend the scraper to also capture prices, discount percentages, tags, or platforms.
-- You could also add filters for users , like “only show games cheaper than X ” or “ only show games with discount higher than Y ”.
-- If you want to be kinder to the website, you can increase `SURVEILLANCE_INTERVAL` so scraping doesn’t happen too often.
-
-
-THANKS FOR READING
+4. Alert Queuing
+- To prevent "flood wait" errors from Telegram:
+- New games are pushed into a new_game_queues dictionary for each user.
+- a repeating job (process_pending_alerts_job) that runs every 10 seconds.
+- It pops one game from the queue and sends it.
