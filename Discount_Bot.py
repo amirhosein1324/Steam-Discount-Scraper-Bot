@@ -588,7 +588,7 @@ if __name__ == '__main__':
     setup_database()
     load_subscriptions()
 
-    BOT_TOKEN = "8496827253:AAFuBLX57cXp3UI125eSDY9C330AQLoopYI"
+    BOT_TOKEN = "PASTE YOUR TELEGRAM BOT TOKEN HERE"
 
     if BOT_TOKEN == "YOUR_TELEGRAM_BOT_TOKEN":
         print("ERROR: You must edit the file and insert your Telegram Bot Token!")
