@@ -24,7 +24,7 @@ from telegram.ext import (
 DATABASE_NAME = 'steam_sales.db'
 URL = 'https://store.steampowered.com/search/?supportedlang=english&specials=1&ndl=1'
 SCROLL_PAUSE_TIME = 2.0
-SURVEILLANCE_INTERVAL = 240
+SURVEILLANCE_INTERVAL = 1800
 SCRAPE_TOLERANCE = 0.90
 
 subscribed_users = set()
