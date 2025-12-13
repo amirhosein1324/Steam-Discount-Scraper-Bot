@@ -3,3 +3,5 @@ venv
 steam_sales.db-shm
 steam_sales.db-wal
 test.py
+test2.py
+test3.py
